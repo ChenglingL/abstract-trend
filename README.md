@@ -22,7 +22,7 @@ abstract-trend/
 ├─ scripts/
 │ ├─ preprocess.ipynb # clean + filter → physics_clean.parquet
 │ ├─ train_bertopic.py # fit BERTopic, save assignments + topic_info
-│ ├─ export_lite_artifacts.py # write topic_terms.csv, topic_trends_by_year.csv topic_rep_docs.csv
+│ ├─ export_rep_docs.py # write topic_terms.csv, topic_trends_by_year.csv topic_rep_docs.csv
 ├─ app/
 │ └─ streamlit_app.py # Lite Streamlit app (no model needed)
 ├─ data/(ignored by git)
@@ -46,16 +46,16 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 1) put your raw data somewhere (CSV or Parquet)
-#    expected columns: id,title,abstract,categories,year
+#    run fetchData.ipynb (switch to your own field)
 
 # 2) preprocess → clean + filter (physics + cond-mat by default)
-
+#    run preprocess
 
 # 3) train BERTopic (tunes vectorizer/UMAP/HDBSCAN)
-python scripts/train_topics.py 
+python scripts/train_bertopic.py  ## change the white list for the abstracts
 
 # 4) export Lite artifacts (small CSVs for the app)
-python scripts/export_lite_artifacts.py
+python scripts/export_rep_docs.py
 
 # 5) (optional) run the Lite Streamlit app locally
 streamlit run app/streamlit_app.py
