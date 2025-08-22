@@ -105,8 +105,10 @@ with np.errstate(all='ignore'):
 
 # --------------------- UI ---------------------
 st.title("Physics/Cond‑Mat Topics Explorer (2005–2025)")
+col11, col22, col33 = st.columns([1.2, 1, 1])
+col11.caption("Browse topics learned offline and visualize 20‑year trends.")
+st.header("Overview")
 col1, col2, col3 = st.columns([1.2, 1, 1])
-col1.caption("Browse topics learned offline and visualize 20‑year trends.")
 
 with st.sidebar:
     st.header("Controls")
@@ -158,20 +160,21 @@ def pretty_label_topic(topic_id: int) -> str:
         return str(show_df.set_index("Topic").loc[tid, "Label"])  # fallback
     except Exception:
         return f"Topic {tid}"
-
+st.markdown("---")
 # Topic selector & details
+st.header("Topic Details")
 topic_choices = show_df["Topic"].tolist()
 def_label_map = {int(t): pretty_label_topic(int(t)) for t in topic_choices}
 
 
 trend_filt = trends[(trends["year"] >= yr_min) & (trends["year"] <= yr_max)].copy()
 
-st.markdown("---")
+
 sel_topic = st.selectbox("Select a topic", options=topic_choices,
                          format_func=lambda x: def_label_map.get(int(x), f"Topic {x}"))
 left, right = st.columns([1.2, 1])
 with left:
-    st.markdown(f"### Topic {sel_topic} — details")
+    st.markdown(f"### Topic {sel_topic}: {def_label_map.get(int(sel_topic))}")
     # Top terms
     t_terms = terms[terms["topic"] == int(sel_topic)].sort_values("weight", ascending=False).head(20)
     if not t_terms.empty:
@@ -210,8 +213,8 @@ with right:
 st.markdown("---")
 
 # Concept search (unified: search box + docs + trend)
-st.subheader("Concept search")
-concept_query = st.text_input("Search topic", value="glass", help="Try phrases like 'glass transition', 'spin glass', 'amorphous solid', 'superconducting qubits'.")
+st.header("Topic search")
+concept_query = st.text_input("Search topic", value="glass transition", help="Try phrases like 'glass transition', 'spin glass', 'amorphous solid', 'superconducting qubits'.")
 if concept_query.strip():
     import re
     pat = re.compile(concept_query.strip(), re.I)
