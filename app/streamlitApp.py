@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Streamlit Explorer — BERTopic Physics/Cond‑Mat Trends (2005–2025)
+Streamlit Explorer — BERTopic Physics/Cond‑Mat Trends (Lite Mode)
 ----------------------------------------------------------------
-Features
-- Loads the trained BERTopic model + artifacts (assignments, topic info, yearly trends)
-- Browsable topic table with human‑readable labels (PrettyName if present)
-- Per‑topic details: top terms, representative docs, yearly prevalence plot
-- Concept search (e.g., "glass" → find best topic id) with robust fallback
-- Optional new‑text classification (if the model includes an embedding model)
+Runs **without** a BERTopic model. Uses saved CSV artifacts only:
+- outputs/topic_info.csv               (Topic, Count, PrettyName/Name optional)
+- outputs/topic_terms.csv              (topic, term, weight)
+- outputs/topic_trends_by_year.csv     (year, topic, count, n, share)
+- outputs/topic_rep_docs.csv           (topic, rank, doc_full|abstract|doc|doc_id, title?) [optional]
 
-Run from repo root:
+Run:
     streamlit run app/streamlit_app.py
-
-Expected files (created by your training script):
-- models/bertopic_physics          (BERTopic.save(..., save_embedding_model=True) if possible)
-- outputs/topic_info.csv          (includes Name/Representation; PrettyName if added)
-- outputs/topic_trends_by_year.csv (columns: year, topic, count, n, share)
-- data/processed/bertopic_assignments.parquet (or .csv fallback)
-
-If Parquet reading fails, this app will fall back to CSV when possible.
 """
 
 from __future__ import annotations
 import os
-import ast
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -34,153 +24,102 @@ import streamlit as st
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-# --------------------- Paths & helpers ---------------------
-ROOT = Path(__file__).resolve().parents[1]  # repo root
-MODELS_DIR = ROOT / "models"
+# --------------------- Paths ---------------------
+ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "outputs"
 DATA_DIR = ROOT / "data" / "processed"
-MODEL_PATH = MODELS_DIR / "bertopic_physics"
-TOPIC_INFO_CSV = OUT_DIR / "topic_info.csv"
-TRENDS_CSV = OUT_DIR / "topic_trends_by_year.csv"
-ASSIGN_PARQUET = DATA_DIR / "bertopic_assignments.parquet"
-ASSIGN_CSV = DATA_DIR / "bertopic_assignments.csv"
 
-st.set_page_config(page_title="Physics Topics Explorer", layout="wide")
+TOPIC_INFO_CSV   = OUT_DIR / "topic_info.csv"
+TOPIC_TERMS_CSV  = OUT_DIR / "topic_terms.csv"
+TOPIC_TRENDS_CSV = OUT_DIR / "topic_trends_by_year.csv"
+TOPIC_REPDOCS_CSV= OUT_DIR / "topic_rep_docs.csv"   # optional
+ASSIGN_CSV       = DATA_DIR / "bertopic_assignments.csv"  # optional
 
+st.set_page_config(page_title="Physics Topics Explorer (Lite)", layout="wide")
+
+# --------------------- IO helpers ---------------------
 @st.cache_data(show_spinner=False)
-def safe_read(path_parquet: Path, path_csv: Path) -> pd.DataFrame:
-    if path_parquet.exists():
-        try:
-            return pd.read_parquet(path_parquet, engine="pyarrow")
-        except Exception as e:
-            st.warning(f"read_parquet failed on {path_parquet.name}: {e}\nFalling back to CSV…")
-    if path_csv.exists():
-        return pd.read_csv(path_csv)
-    raise FileNotFoundError(f"Neither {path_parquet} nor {path_csv} found.")
-
-@st.cache_resource(show_spinner=True)
-def load_model(model_path: Path):
-    from bertopic import BERTopic
+def load_csv(path: Path) -> Optional[pd.DataFrame]:
     try:
-        model = BERTopic.load(str(model_path))
-        return model
+        if path.exists():
+            return pd.read_csv(path)
+        # allow parquet fallbacks for known tables
+        pqp = path.with_suffix(".parquet")
+        if pqp.exists():
+            return pd.read_parquet(pqp)
     except Exception as e:
-        st.error(f"Failed to load BERTopic model at {model_path}: {e}")
-        return None
+        st.warning(f"Failed to load {path.name}: {e}")
+    return None
 
-@st.cache_data(show_spinner=False)
-def load_tables():
-    try:
-        info = pd.read_csv(TOPIC_INFO_CSV)
-    except Exception as e:
-        st.error(f"Failed to read topic info CSV at {TOPIC_INFO_CSV}: {e}")
-        info = None
-    try:
-        trend = pd.read_csv(TRENDS_CSV)
-    except Exception as e:
-        st.error(f"Failed to read trends CSV at {TRENDS_CSV}: {e}")
-        trend = None
-    try:
-        assign = safe_read(ASSIGN_PARQUET, ASSIGN_CSV)
-    except Exception as e:
-        st.warning(f"Assignments table missing/invalid: {e}")
-        assign = pd.DataFrame()
 
-    # Normalize dtypes if loaded
-    if isinstance(info, pd.DataFrame) and "Topic" in info.columns:
-        try:
-            info["Topic"] = info["Topic"].astype(int)
-        except Exception:
-            pass
-    if isinstance(trend, pd.DataFrame):
-        for c in ("year", "topic"):
-            if c in trend.columns:
-                try:
-                    trend[c] = trend[c].astype(int)
-                except Exception:
-                    pass
-    return info, trend, assign
+# --------------------- Load artifacts & Health Check ---------------------
+SHOW_HEALTHCHECK = bool(int(os.getenv("SHOW_HEALTHCHECK", "0"))) ## debugging mode
+if SHOW_HEALTHCHECK:
+    st.subheader("Health Check")
+    st.code("\n".join([
+        str(TOPIC_INFO_CSV),
+        str(TOPIC_TERMS_CSV),
+        str(TOPIC_TRENDS_CSV),
+        f"{str(TOPIC_REPDOCS_CSV)} (optional)",
+        f"{str(ASSIGN_CSV)} (optional)",
+    ]))
+info   = load_csv(TOPIC_INFO_CSV)
+terms  = load_csv(TOPIC_TERMS_CSV)
+trends = load_csv(TOPIC_TRENDS_CSV)
+repdocs= load_csv(TOPIC_REPDOCS_CSV)
+assign = load_csv(ASSIGN_CSV)
 
-# Robust concept → topic id utility
-def find_concept_topic(model, concept: str, info_df: pd.DataFrame) -> Optional[int]:
-    # Valid topics (exclude -1)
-    valid = {int(t) for t in info_df.get("Topic", pd.Series(dtype=int)).tolist() if int(t) != -1}
-    # Try search APIs
-    try:
-        res = model.search_topics(concept)
-        cand = [int(r[0]) for r in res if int(r[0]) in valid]
-        if cand:
-            return cand[0]
-    except Exception:
-        try:
-            ids, _ = model.find_topics(concept, top_n=min(10, max(1, len(valid))))
-            cand = [int(i) for i in ids if int(i) in valid]
-            if cand:
-                return cand[0]
-        except Exception:
-            pass
-    # Fallback: scan topic words for keyword hits
-    import re
-    pat = re.compile(r"(glass|glassy|glass[- ]transition|spin[- ]glass|amorphous|vitreous)", re.I)
-    best, score = None, -1.0
-    for t in sorted(valid):
-        reps = model.get_topic(int(t)) or []
-        s = sum(float(w) for term, w in reps if pat.search(term))
-        if s > score:
-            best, score = int(t), s
-    return best
+missing = []
+if not isinstance(info, pd.DataFrame):
+    missing.append("outputs/topic_info.csv")
+if not isinstance(terms, pd.DataFrame):
+    missing.append("outputs/topic_terms.csv")
+if not isinstance(trends, pd.DataFrame):
+    missing.append("outputs/topic_trends_by_year.csv")
+if missing:
+    st.error("Missing/failed artifacts: " + ", ".join(missing))
+    st.stop()
 
-# Pretty label utility
-def pretty_label(model, topic_id: int) -> str:
-    reps = model.get_topic(int(topic_id)) or []
-    phrases = [t for t, w in reps if " " in t]
-    chosen = phrases[:3] if phrases else [t for t, w in reps[:3]]
-    return " / ".join(chosen) if chosen else str(topic_id)
+# Normalize dtypes
+with np.errstate(all='ignore'):
+    if "Topic" in info.columns:
+        info["Topic"] = pd.to_numeric(info["Topic"], errors="coerce").astype("Int64")
+    if "Count" in info.columns:
+        info["Count"] = pd.to_numeric(info["Count"], errors="coerce")
+    terms["topic"] = pd.to_numeric(terms["topic"], errors="coerce").astype("Int64")
+    if "weight" in terms.columns:
+        terms["weight"] = pd.to_numeric(terms["weight"], errors="coerce")
+    trends["topic"] = pd.to_numeric(trends["topic"], errors="coerce").astype("Int64")
+    trends["year"] = pd.to_numeric(trends["year"], errors="coerce").astype("Int64")
+    for c in ("share","count","n"):
+        if c in trends.columns:
+            trends[c] = pd.to_numeric(trends[c], errors="coerce")
+    if isinstance(repdocs, pd.DataFrame):
+        if "topic" in repdocs.columns:
+            repdocs["topic"] = pd.to_numeric(repdocs["topic"], errors="coerce").astype("Int64")
+        if "rank" in repdocs.columns:
+            repdocs["rank"] = pd.to_numeric(repdocs["rank"], errors="coerce").astype("Int64")
+        for idcol in ("doc_id","id","paper_id"):
+            if idcol in repdocs.columns:
+                repdocs[idcol] = repdocs[idcol].astype(str)
 
 # --------------------- UI ---------------------
 st.title("Physics/Cond‑Mat Topics Explorer (2005–2025)")
 col1, col2, col3 = st.columns([1.2, 1, 1])
-col1.caption("Browse topics learned with BERTopic and visualize 20‑year trends. Use the sidebar to filter.")
+col1.caption("Browse topics learned offline and visualize 20‑year trends.")
 
 with st.sidebar:
     st.header("Controls")
     include_outliers = st.checkbox("Include outliers (Topic = -1)", value=False)
-    concept = st.text_input("Concept search", value="glass")
     yr_min, yr_max = st.slider("Year range", 2005, 2025, (2005, 2025), step=1)
     st.divider()
     st.caption("Data locations (read‑only)")
-    st.code(f"{MODEL_PATH}\n{TOPIC_INFO_CSV}\n{TRENDS_CSV}")
-
-# Load artifacts
-st.subheader("Health Check")
-st.code(f"""ROOT={ROOT}
-MODEL_PATH={MODEL_PATH}
-TOPIC_INFO_CSV={TOPIC_INFO_CSV}
-TRENDS_CSV={TRENDS_CSV}
-ASSIGN_PARQUET={ASSIGN_PARQUET}""")
-
-model = load_model(MODEL_PATH)
-info, trend, assign = load_tables()
-
-missing = []
-if model is None:
-    missing.append("model")
-if not isinstance(info, pd.DataFrame):
-    missing.append("topic_info.csv")
-if not isinstance(trend, pd.DataFrame):
-    missing.append("topic_trends_by_year.csv")
-
-if missing:
-    st.error("Missing/failed artifacts: " + ", ".join(missing))
-    st.info("Ensure your training script wrote these files to the expected paths above. Adjust paths at the top of this app if your layout differs.")
-    st.stop()
+    st.code("".join([str(TOPIC_INFO_CSV), str(TOPIC_TERMS_CSV), str(TOPIC_TRENDS_CSV)]))
 
 # KPIs
-n_docs = int(assign.shape[0]) if not assign.empty else int(trend["n"].max())
-outlier_row = info[info["Topic"] == -1]
-outliers = int(outlier_row["Count"].iloc[0]) if not outlier_row.empty else 0
+n_docs = int(assign.shape[0]) if isinstance(assign, pd.DataFrame) and not assign.empty else int(info["Count"].sum())
+outliers = int(info.loc[info["Topic"] == -1, "Count"].iloc[0]) if (-1 in info["Topic"].values) else 0
 n_topics = int((info["Topic"] != -1).sum())
-
 with col1:
     st.metric("Documents", f"{n_docs:,}")
 with col2:
@@ -190,49 +129,74 @@ with col3:
     st.metric("Outlier share", f"{share:.1%}")
 
 # Prepare table
-name_col = "PrettyName" if "PrettyName" in info.columns else "Name"
+name_col = "PrettyName" if "PrettyName" in info.columns else ("Name" if "Name" in info.columns else None)
 show_df = info.copy()
 if not include_outliers:
     show_df = show_df[show_df["Topic"] != -1]
-show_df = show_df[["Topic", "Count", name_col]].rename(columns={name_col: "Label"}).sort_values("Count", ascending=False)
+if name_col:
+    show_df = show_df[["Topic", "Count", name_col]].rename(columns={name_col: "Label"})
+else:
+    show_df = show_df[["Topic", "Count"]].assign(Label=lambda d: d["Topic"].astype(str))
+show_df = show_df.sort_values("Count", ascending=False)
 
 st.subheader("Topics")
 st.dataframe(show_df.reset_index(drop=True), use_container_width=True, hide_index=True)
 
-# Topic selector
+# Helper: pretty label from terms
+def pretty_label_topic(topic_id: int) -> str:
+    tid = int(topic_id)
+    try:
+        terms_list = (terms[terms["topic"] == tid]
+                        .sort_values("weight", ascending=False)["term"].tolist())
+        phrases = [t for t in terms_list if (" " in t) or ("-" in t)]
+        chosen = (phrases[:3] or terms_list[:3])
+        if chosen:
+            return " / ".join(chosen)
+    except Exception:
+        pass
+    try:
+        return str(show_df.set_index("Topic").loc[tid, "Label"])  # fallback
+    except Exception:
+        return f"Topic {tid}"
+
+# Topic selector & details
 topic_choices = show_df["Topic"].tolist()
-def_label_map = {int(t): pretty_label(model, int(t)) for t in topic_choices[:200]}  # cache first 200 lazily
-sel_topic = st.selectbox("Select a topic", options=topic_choices, format_func=lambda x: def_label_map.get(int(x), f"Topic {x}"))
+def_label_map = {int(t): pretty_label_topic(int(t)) for t in topic_choices}
 
-# Filter trend by year
-trend_filt = trend[(trend["year"] >= yr_min) & (trend["year"] <= yr_max)].copy()
 
-# Topic details block
+trend_filt = trends[(trends["year"] >= yr_min) & (trends["year"] <= yr_max)].copy()
+
 st.markdown("---")
+sel_topic = st.selectbox("Select a topic", options=topic_choices,
+                         format_func=lambda x: def_label_map.get(int(x), f"Topic {x}"))
 left, right = st.columns([1.2, 1])
-
 with left:
     st.markdown(f"### Topic {sel_topic} — details")
-    reps = model.get_topic(int(sel_topic)) or []
-    if reps:
-        terms = pd.DataFrame(reps, columns=["term", "weight"])[:20]
+    # Top terms
+    t_terms = terms[terms["topic"] == int(sel_topic)].sort_values("weight", ascending=False).head(20)
+    if not t_terms.empty:
         st.write("**Top terms**")
-        st.table(terms)
-    # Representative docs
+        st.table(t_terms)
+    # Representative docs (prefer full abstract)
     st.write("**Representative documents**")
-    rep_docs: List[str] = []
-    # Try model API first
-    try:
-        rep_docs = model.get_representative_docs(int(sel_topic))  # available in newer versions
-    except Exception:
-        # Fallback: parse from CSV if present
-        if "Representative_Docs" in info.columns:
-            try:
-                rep_docs = ast.literal_eval(info.loc[info["Topic"] == int(sel_topic), "Representative_Docs"].iloc[0])
-            except Exception:
-                rep_docs = []
-    for i, doc in enumerate(rep_docs[:3], 1):
-        st.markdown(f"**Doc {i}.** {doc}")
+    display_docs: List[str] = []
+    if isinstance(repdocs, pd.DataFrame):
+        subrep = repdocs[repdocs["topic"] == int(sel_topic)].sort_values("rank" if "rank" in repdocs.columns else repdocs.columns[0]).copy()
+        if "doc_full" in subrep.columns:
+            display_docs = subrep["doc_full"].dropna().astype(str).tolist()
+        elif "abstract" in subrep.columns:
+            display_docs = subrep["abstract"].dropna().astype(str).tolist()
+        elif "doc" in subrep.columns:
+            display_docs = subrep["doc"].dropna().astype(str).tolist()
+        elif "doc_id" in subrep.columns and isinstance(FULL_CORPUS, pd.DataFrame) and {"id","abstract"}.issubset(FULL_CORPUS.columns):
+            merged = subrep.merge(FULL_CORPUS.rename(columns={"id":"doc_id"}), on="doc_id", how="left")
+            display_docs = merged["abstract"].dropna().astype(str).tolist()
+    if not display_docs:
+        st.info("No representative documents available for this topic.")
+    else:
+        for i, doc in enumerate(display_docs[:3], 1):
+            with st.expander(f"Doc {i}"):
+                st.write(doc)
 
 with right:
     st.write("**Yearly prevalence (share of papers)**")
@@ -240,41 +204,54 @@ with right:
     if sub.empty:
         st.info("No trend data for this topic in the selected year range.")
     else:
-        # Smooth with 3-year rolling average (display both raw and smooth)
-        sub = sub.copy()
-        sub["share_smooth"] = sub["share"].rolling(3, center=True).mean()
+        sub = sub.copy(); sub["share_smooth"] = sub["share"].rolling(3, center=True).mean()
         st.line_chart(sub.set_index("year")[ ["share", "share_smooth"] ])
 
 st.markdown("---")
 
-# Concept search & classification
-st.subheader("Concept tools")
-cc1, cc2 = st.columns([1,1])
-with cc1:
-    if concept.strip():
-        t_id = find_concept_topic(model, concept.strip(), info)
-        if t_id is None:
-            st.warning(f"No matching topic found for '{concept}'.")
-        else:
-            st.success(f"Best topic for '{concept}': {t_id} — {pretty_label(model, t_id)}")
+# Concept search (unified: search box + docs + trend)
+st.subheader("Concept search")
+concept_query = st.text_input("Search topic", value="glass", help="Try phrases like 'glass transition', 'spin glass', 'amorphous solid', 'superconducting qubits'.")
+if concept_query.strip():
+    import re
+    pat = re.compile(concept_query.strip(), re.I)
+    hits = terms.assign(hit=terms["term"].str.contains(pat))
+    scores = (hits.groupby("topic")["hit"].sum()
+                   .reset_index()
+                   .sort_values(["hit", "topic"], ascending=[False, True]))
+    if scores.empty or scores.iloc[0]["hit"] <= 0:
+        st.warning(f"No matching topic found for '{concept_query}'.")
+    else:
+        t_id = int(scores.iloc[0]["topic"])
+        st.success(f"Best topic for '{concept_query}': {t_id} — {pretty_label_topic(t_id)}")
+        c1, c2 = st.columns([1.2, 1])
+        with c1:
+            st.write("**Representative documents**")
+            display_docs: List[str] = []
+            if isinstance(repdocs, pd.DataFrame):
+                subrep = repdocs[repdocs["topic"] == int(t_id)].sort_values("rank" if "rank" in repdocs.columns else repdocs.columns[0]).copy()
+                if "doc_full" in subrep.columns:
+                    display_docs = subrep["doc_full"].dropna().astype(str).tolist()
+                elif "abstract" in subrep.columns:
+                    display_docs = subrep["abstract"].dropna().astype(str).tolist()
+                elif "doc" in subrep.columns:
+                    display_docs = subrep["doc"].dropna().astype(str).tolist()
+                elif "doc_id" in subrep.columns and isinstance(FULL_CORPUS, pd.DataFrame) and {"id","abstract"}.issubset(FULL_CORPUS.columns):
+                    merged = subrep.merge(FULL_CORPUS.rename(columns={"id":"doc_id"}), on="doc_id", how="left")
+                    display_docs = merged["abstract"].dropna().astype(str).tolist()
+            if not display_docs:
+                st.info("No representative documents available.")
+            else:
+                for i, doc in enumerate(display_docs[:3], 1):
+                    with st.expander(f"Doc {i}"):
+                        st.write(doc)
+        with c2:
+            st.write("**Yearly prevalence (share of papers)**")
             sub = trend_filt[trend_filt["topic"] == int(t_id)].sort_values("year")
-            if not sub.empty:
+            if sub.empty:
+                st.info("No trend data for this topic in the selected year range.")
+            else:
                 sub = sub.copy(); sub["share_smooth"] = sub["share"].rolling(3, center=True).mean()
                 st.line_chart(sub.set_index("year")[ ["share", "share_smooth"] ])
 
-with cc2:
-    st.write("**Classify a new abstract**")
-    txt = st.text_area("Paste an abstract to predict its topic", height=180)
-    if st.button("Predict"):
-        if not txt.strip():
-            st.warning("Please paste an abstract first.")
-        else:
-            # Only works if the model has an embedding model bundled
-            try:
-                topics, probs = model.transform([txt])
-                t = int(topics[0])
-                st.info(f"Predicted topic: {t} — {pretty_label(model, t)}")
-            except Exception as e:
-                st.error(f"Prediction unavailable (model may lack an embedding model): {e}")
-
-st.caption("Tip: toggle outliers, narrow the year range, or change the concept term to explore different trends (e.g., 'spin glass', 'amorphous solid', 'superconducting qubits').")
+st.caption("Lite mode uses precomputed topic terms and trends — no model required. Representative docs prefer full abstracts when available.")
