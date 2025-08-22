@@ -1,4 +1,3 @@
-# abstract-trend
 # abstract-trend — Topic Trends from Abstracts (BERTopic)
 
 Train your own topic model on research **abstracts** and generate multi-year **trend plots** — starting with arXiv **physics + cond-mat**. You can swap in **any field** (bio, NLP, economics, etc.) by changing the data source and category filter. The pipeline also exports **Lite CSV artifacts** for a tiny Streamlit app (no large model required).
@@ -18,7 +17,7 @@ Train your own topic model on research **abstracts** and generate multi-year **t
 
 
 ## Repository layout
-
+```bash
 abstract-trend/
 ├─ scripts/
 │ ├─ preprocess.ipynb # clean + filter → physics_clean.parquet
@@ -33,6 +32,7 @@ abstract-trend/
 ├─ requirements.txt
 ├─ .gitignore
 └─ README.md
+```
 
 ## Quickstart
 
