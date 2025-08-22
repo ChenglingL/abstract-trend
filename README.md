@@ -49,7 +49,7 @@ pip install -r requirements.txt
 #    run fetchData.ipynb (switch to your own field)
 
 # 2) preprocess → clean + filter (physics + cond-mat by default)
-#    run preprocess
+#    run preprocess.ipynb
 
 # 3) train BERTopic (tunes vectorizer/UMAP/HDBSCAN)
 python scripts/train_bertopic.py  ## change the white list for the abstracts
